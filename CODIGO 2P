@@ -1,0 +1,155 @@
+#include "msp430f5529.h"
+#include <stdint.h>
+#include <stdio.h>
+
+volatile uint8_t mostrarFahrenheit = 0;
+unsigned char digito_actual = 0;
+unsigned char letra_actual = 0x39;  
+unsigned char display[3] = {0, 0, 0};
+
+const unsigned char tabla_segmentos[10] = {
+    0x3F, 0x06, 0x5B, 0x4F, 0x66,
+    0x6D, 0x7D, 0x07, 0x7F, 0x6F
+};
+
+void configurarADC(void);
+uint16_t leerADC(void);
+uint16_t celsiusAFahrenheit(uint16_t celsius);
+void configurarBoton(void);
+void configurarUART(void);
+void enviarCadena(char *str);
+void actualizarDisplay(uint16_t temperatura);
+
+void main(void) {
+    WDTCTL = WDTPW | WDTHOLD;
+
+    P3DIR |= 0x7F;
+    P3OUT &= ~0x7F;
+    P4DIR |= 0x0F;
+    P4OUT &= ~0x0F;
+
+    configurarADC();
+    configurarBoton();
+    configurarUART();
+
+    TA0CCTL0 = CCIE;
+    TA0CCR0  = 1000 - 1;  // ~1 ms por dígito → ciclo total ~4 ms → 250 Hz
+    TA0CTL   = TASSEL_2 | MC_1 | ID_3 | TACLR;
+
+    __enable_interrupt();
+    __bis_SR_register(LPM0_bits);
+}
+
+void configurarADC(void) {
+    P6SEL |= BIT0;
+    ADC12CTL0 = ADC12SHT0_2 | ADC12ON;
+    ADC12CTL1 = ADC12SHP;
+    ADC12MCTL0 = ADC12INCH_0;
+    ADC12CTL0 |= ADC12ENC;
+}
+
+uint16_t leerADC(void) {
+    ADC12CTL0 |= ADC12SC;
+    while (ADC12CTL1 & ADC12BUSY);
+    return ADC12MEM0;
+}
+
+uint16_t celsiusAFahrenheit(uint16_t celsius) {
+    return (celsius * 9 / 5) + 32;
+}
+
+void configurarBoton(void) {
+    P1DIR &= ~BIT1;
+    P1REN |= BIT1;
+    P1OUT |= BIT1;
+    P1IE  |= BIT1;
+    P1IES |= BIT1;
+    P1IFG &= ~BIT1;
+}
+
+void configurarUART(void) {
+    P4SEL |= BIT4 + BIT5;
+    UCA1CTL1 |= UCSWRST;
+    UCA1CTL1 |= UCSSEL_2;
+    UCA1BR0 = 6;
+    UCA1BR1 = 0;
+    UCA1MCTL = UCBRS_0 + UCBRF_13 + UCOS16;
+    UCA1CTL1 &= ~UCSWRST;
+}
+
+void enviarCadena(char *str) {
+    while (*str != 0) {
+        while (!(UCA1IFG & UCTXIFG));
+        UCA1TXBUF = *str++;
+    }
+}
+
+void actualizarDisplay(uint16_t temperatura) {
+    display[0] = temperatura / 100;
+    display[1] = (temperatura / 10) % 10;
+    display[2] = temperatura % 10;
+}
+
+#pragma vector = TIMER0_A0_VECTOR
+__interrupt void TIMER0_A0_ISR(void) {
+    static uint16_t sendCounter = 0;
+    static unsigned long adc_accum = 0;
+    static uint16_t sample_count = 0;
+    static uint16_t last_temp = 0;
+    uint16_t adc_value, mv, temp_c, temp_mostrar;
+    char buffer[32];
+
+    adc_value = leerADC();
+    adc_accum += adc_value;
+    sample_count++;
+
+    if (sample_count >= 16) {
+        adc_value = adc_accum / 16;
+        adc_accum = 0;
+        sample_count = 0;
+
+        mv = (uint32_t)adc_value * 3300 / 4095;
+        temp_c = mv / 10;
+
+        if (temp_c > last_temp + 1 || temp_c < last_temp -1) {
+            last_temp = temp_c;
+        }
+
+        temp_mostrar = mostrarFahrenheit ? celsiusAFahrenheit(last_temp) : last_temp;
+        if (temp_mostrar > 999) temp_mostrar = 999;
+
+        actualizarDisplay(temp_mostrar);
+        letra_actual = mostrarFahrenheit ? 0x71 : 0x39;
+
+        if (++sendCounter >= 500) {
+            sendCounter = 0;
+            sprintf(buffer, "%d %c\r\n", temp_mostrar, mostrarFahrenheit ? 'F' : 'C');
+            enviarCadena(buffer);
+        }
+    }
+
+    P4OUT &= ~0x0F;
+
+    switch (digito_actual) {
+        case 0:
+        case 1:
+        case 2:
+            P3OUT = tabla_segmentos[display[digito_actual]];
+            P4OUT |= (1 << digito_actual);
+            break;
+        case 3:
+            P3OUT = letra_actual;
+            P4OUT |= BIT3;
+            break;
+    }
+
+    digito_actual++;
+    if (digito_actual > 3)
+        digito_actual = 0;
+}
+
+#pragma vector = PORT1_VECTOR
+__interrupt void Port_1(void) {
+    mostrarFahrenheit ^= 1;
+    P1IFG &= ~BIT1;
+}
