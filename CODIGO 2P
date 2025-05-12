@@ -33,7 +33,7 @@ void main(void) {
     configurarUART();
 
     TA0CCTL0 = CCIE;
-    TA0CCR0  = 1000 - 1;  // ~1 ms por dígito → ciclo total ~4 ms → 250 Hz
+    TA0CCR0  = 500 - 1;  // ~1 ms por dígito → ciclo total ~4 ms → 250 Hz
     TA0CTL   = TASSEL_2 | MC_1 | ID_3 | TACLR;
 
     __enable_interrupt();
